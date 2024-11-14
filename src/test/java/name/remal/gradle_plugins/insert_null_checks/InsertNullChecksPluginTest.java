@@ -8,18 +8,18 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 @RequiredArgsConstructor
-class TemplatePluginTest {
+class InsertNullChecksPluginTest {
 
     final Project project;
 
     @BeforeEach
     void beforeEach() {
-        project.getPluginManager().apply(TemplatePlugin.class);
+        project.getPluginManager().apply(InsertNullChecksPlugin.class);
     }
 
     @Test
     void test() {
-        assertTrue(project.getPlugins().hasPlugin(TemplatePlugin.class));
+        assertTrue(project.getPlugins().hasPlugin(InsertNullChecksPlugin.class));
     }
 
 }

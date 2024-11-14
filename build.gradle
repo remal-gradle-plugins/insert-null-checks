@@ -3,7 +3,7 @@
 buildscript {
     String rootGroupId = project.ext.rootGroupId = "name.remal.gradle-plugins.${rootProject.name}"
     String rootArtifactId = project.ext.rootArtifactId = rootProject.name
-    String rootSnapshotVersion = project.ext.rootSnapshotVersion = '1-SNAPSHOT'
+    String rootSnapshotVersion = project.ext.rootSnapshotVersion = '2-SNAPSHOT'
     dependencies {
         //classpath("$rootGroupId:$rootArtifactId:$rootSnapshotVersion") { version { strictly(rootSnapshotVersion) } }
         classpath 'name.remal.gradle-plugins.toolkit:build-logic:0.67.0'
@@ -26,17 +26,180 @@ apply plugin: 'name.remal.toolkit.build-logic'
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 apply plugin: 'java-gradle-plugin'
+apply plugin: 'name.remal.generate-sources'
 
 dependencies {
+    optional 'org.ow2.asm:asm-util'
+
+    implementation 'org.ow2.asm:asm-tree'
+
+
+    testImplementation 'com.google.jimfs:jimfs:1.3.0'
 }
 
 gradlePlugin {
     plugins {
         'name.remal.insert-null-checks' {
             id = 'name.remal.insert-null-checks'
-            implementationClass = 'name.remal.gradle_plugins.insert_null_checks.TemplatePlugin'
-            displayName = 'Plugin'
+            implementationClass = 'name.remal.gradle_plugins.insert_null_checks.InsertNullChecksPlugin'
+            displayName = 'Insert null checks into class files'
             description = property('repository-description')
+        }
+    }
+}
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+SetProperty<String> exclusionAnnotationClassNames = project.ext.exclusionAnnotationClassNames = project.objects.setProperty(String.class).value(
+    [
+        'org.immutables.value.Generated', // Immutables library handles nullability itself
+    ].toSorted()
+).with { it.finalizeValueOnRead(); it }
+
+
+SetProperty<String> validationAnnotationClassNames = project.ext.validationAnnotationClassNames = project.objects.setProperty(String.class).value(
+    [
+    ].toSorted()
+).with { it.finalizeValueOnRead(); it }
+
+
+SetProperty<String> validationAnnotationBasePackages = project.ext.validationAnnotationBasePackages = project.objects.setProperty(String.class).value(
+    [
+        'jakarta.validation',
+        'javax.validation',
+        'org.hibernate.validator',
+        'org.springframework.validation',
+        'io.micronaut.validation',
+        'io.quarkus.hibernate.validator',
+        'org.eclipse.lsp4j.jsonrpc.validation',
+    ].toSorted()
+).with { it.finalizeValueOnRead(); it }
+
+
+Closure<Collection<String>> getCheckerFrameworkNullabilityAnnotations = { String sectionId ->
+    def documentationDocument = project.loadHtmlFromUrl('https://checkerframework.org/manual/')
+
+    def notNullTableElements = documentationDocument.select("blockquote.figure:has(a#$sectionId) table table")
+    if (notNullTableElements.isEmpty()) {
+        throw new GradleException("Nullability annotations table node can't be found for `$sectionId` section")
+    }
+
+    return notNullTableElements.select('td')
+        .collect { it.text().toString() }
+        .collect { it.replaceAll(/[^\w.]/, '') }
+        .findAll { it.contains('.') }
+        .findAll { !it.startsWith('jakarta.validation.constraints.') }
+        .findAll { !it.startsWith('javax.validation.constraints.') }
+        .findAll { !it.startsWith('org.eclipse.lsp4j.jsonrpc.validation.') }
+        .toUnique()
+        .toSorted()
+}.memoize()
+
+SetProperty<String> nonNullAnnotationClassNames = project.ext.nonNullAnnotationClassNames = project.objects.setProperty(String.class).value(
+    provider {
+        Collection<String> notNullAnnotationClassNames = getCheckerFrameworkNullabilityAnnotations('fig-nullness-refactoring-nonnull')
+
+        ; [
+            'jakarta.annotation.Nonnull',
+            'javax.annotation.Nonnull',
+            'org.jetbrains.annotations.NotNull',
+            'org.jspecify.annotations.NonNull',
+            'org.jspecify.nullness.NonNull',
+        ].forEach { expectedClassName ->
+            if (!notNullAnnotationClassNames.contains(expectedClassName)) {
+                throw new GradleException("Parsed non-null annotation class names don't contain '$expectedClassName': $notNullAnnotationClassNames")
+            }
+        }
+
+        ; [
+            'jakarta.validation.constraints.NotNull',
+            'javax.validation.constraints.NotNull',
+            'org.eclipse.lsp4j.jsonrpc.validation.NonNull',
+        ].forEach { unexpectedClassName ->
+            if (notNullAnnotationClassNames.contains(unexpectedClassName)) {
+                throw new GradleException("Parsed non-null annotation class names contain '$unexpectedClassName': $notNullAnnotationClassNames")
+            }
+        }
+
+        return notNullAnnotationClassNames
+    }
+).with { it.finalizeValueOnRead(); it }
+
+SetProperty<String> nullableAnnotationSimpleClassNames = project.ext.nullableAnnotationSimpleClassNames = project.objects.setProperty(String.class).value(
+    provider {
+        Collection<String> nullableAnnotationClassNames = getCheckerFrameworkNullabilityAnnotations('fig-nullness-refactoring-nullable')
+        nullableAnnotationClassNames += [
+            'jakarta.validation.constraints.Null',
+            'jakarta.validation.constraints.Null$List',
+            'javax.validation.constraints.Null',
+            'javax.validation.constraints.Null$List',
+        ]
+        nullableAnnotationClassNames = nullableAnnotationClassNames.toUnique().toSorted()
+
+        ; [
+            'jakarta.annotation.Nullable',
+            'jakarta.validation.constraints.Null',
+            'javax.annotation.Nullable',
+            'org.jetbrains.annotations.Nullable',
+            'org.jetbrains.annotations.UnknownNullability',
+            'org.jspecify.nullness.Nullable',
+        ].forEach { expectedClassName ->
+            if (!nullableAnnotationClassNames.contains(expectedClassName)) {
+                throw new GradleException("Parsed nullable annotation class names don't contain '$expectedClassName': $nullableAnnotationClassNames")
+            }
+        }
+
+        ; [
+        ].forEach { unexpectedClassName ->
+            if (nullableAnnotationClassNames.contains(unexpectedClassName)) {
+                throw new GradleException("Parsed nullable annotation class names contain '$unexpectedClassName': $nullableAnnotationClassNames")
+            }
+        }
+
+        return nullableAnnotationClassNames
+    }
+).with { it.finalizeValueOnRead(); it }
+
+
+tasks.named('generateJava') {
+    inputs.property('exclusionAnnotationClassNames', exclusionAnnotationClassNames)
+    inputs.property('validationAnnotationClassNames', validationAnnotationClassNames)
+    inputs.property('validationAnnotationPackages', validationAnnotationBasePackages)
+    inputs.property('nonNullAnnotationClassNames', nonNullAnnotationClassNames)
+    inputs.property('nullableAnnotationSimpleClassNames', nullableAnnotationSimpleClassNames)
+
+    classFile(project.calculateBaseJavaPackage(), 'NullabilityAnnotations') {
+        it.writePackage()
+        it.println("")
+        it.writeStaticImport('lombok.AccessLevel', 'PRIVATE')
+        it.println("")
+        it.writeImport("com.google.common.collect.ImmutableList")
+        it.writeImport("java.util.List")
+        it.writeImport("lombok.NoArgsConstructor")
+        it.println("")
+        it.println("@NoArgsConstructor(access = PRIVATE)")
+        it.writeSuppressWarnings("checkstyle:LineLength", "checkstyle:RightCurlyAlone", "checkstyle:RightCurly", "java:S3776", "java:S131", "java:S1479")
+        it.writeBlock("abstract class ${it.simpleName}") {
+            it.writeln("public static final List<String> EXCLUSION_ANNOTATION_CLASS_NAMES = ImmutableList.of(")
+            it.writeln("    " + exclusionAnnotationClassNames.get().collect { '"' + it + '"' }.join(',\n    '))
+            it.writeln(");")
+
+            it.writeln("public static final List<String> VALIDATION_ANNOTATION_CLASS_NAMES = ImmutableList.of(")
+            it.writeln("    " + validationAnnotationClassNames.get().collect { '"' + it + '"' }.join(',\n    '))
+            it.writeln(");")
+
+            it.writeln("public static final List<String> VALIDATION_ANNOTATION_BASE_PACKAGES = ImmutableList.of(")
+            it.writeln("    " + validationAnnotationBasePackages.get().collect { '"' + it + '"' }.join(',\n    '))
+            it.writeln(");")
+
+            it.writeln("public static final List<String> NOT_NULL_ANNOTATION_CLASS_NAMES = ImmutableList.of(")
+            it.writeln("    " + nonNullAnnotationClassNames.get().collect { '"' + it + '"' }.join(',\n    '))
+            it.writeln(");")
+
+            it.writeln("")
+            it.writeln("public static final List<String> NULLABLE_ANNOTATION_CLASS_NAMES = ImmutableList.of(")
+            it.writeln("    " + nullableAnnotationSimpleClassNames.get().collect { '"' + it + '"' }.join(',\n    '))
+            it.writeln(");")
         }
     }
 }
